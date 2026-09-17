@@ -42,6 +42,14 @@ else()
     # element, which reaches cargo as a single quoted argv entry
     # ("--no-default-features --features=...") that it doesn't understand.
     set(ZENOHC_CARGO_FLAGS "--no-default-features$<SEMICOLON>--features=zenoh/transport_tcp")
+    # ZENOHC_CUSTOM_TARGET (referenced below via ament_vendor's CMAKE_ARGS,
+    # passed straight through to zenoh-c's own CMakeLists.txt, which adds
+    # --target=${ZENOHC_CUSTOM_TARGET} to the cargo invocation) is otherwise
+    # never set anywhere in this file -- without it, cargo defaults to the
+    # build platform's own host triple, so the "cross-compile" quietly
+    # produces a native .dylib/.so instead of a wasm32 build (confirmed: the
+    # first attempt at this "succeeded" but installed a .dylib).
+    set(ZENOHC_CUSTOM_TARGET "wasm32-unknown-emscripten")
   else()
     set(ZENOHC_CARGO_FLAGS "--features=shared-memory zenoh/transport_serial")
   endif()

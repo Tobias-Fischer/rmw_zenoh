@@ -21,7 +21,14 @@ else()
   # Note: the list of features are separated with whitespaces.
   # However, if you want to add other cargo build flags, use "$<SEMICOLON>" as separator and not ";" as the
   # latter is a list separater in cmake and hence the string will be split into two when expanded.
-  set(ZENOHC_CARGO_FLAGS "--features=shared-memory zenoh/transport_serial")
+  # shared-memory needs real OS shared memory (POSIX shm/mmap), which doesn't
+  # exist -- or mean anything -- across a browser/WASM boundary, so it's
+  # dropped for the wasm32 experiment below.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    set(ZENOHC_CARGO_FLAGS "--features=zenoh/transport_serial")
+  else()
+    set(ZENOHC_CARGO_FLAGS "--features=shared-memory zenoh/transport_serial")
+  endif()
 
   include(get_cargo_version.cmake)
   get_cargo_version()
@@ -39,23 +46,50 @@ else()
     set(zenoh_c_commit b31348fa7f94f44f1f7b049c111a710e970a2725)
   endif()
 
-  ament_vendor(zenoh_c_vendor
-    VCS_URL https://github.com/eclipse-zenoh/zenoh-c.git
-    VCS_VERSION ${zenoh_c_commit}
-    PATCHES
-      silence-build-script-warnings.patch
-    CMAKE_ARGS
-      "-DZENOHC_CARGO_FLAGS=${ZENOHC_CARGO_FLAGS}"
-      "-DZENOHC_BUILD_WITH_UNSTABLE_API=TRUE"
-      "-DZENOHC_CUSTOM_TARGET=${ZENOHC_CUSTOM_TARGET}"
-  )
+  # wasm32-unknown-emscripten experiment (not upstream): build zenoh-c/zenoh-cpp
+  # from Tobias-Fischer's forks (branch wasm32-nonblocking-open on each), which
+  # add the non-blocking Runtime/SessionOpenTask API this target needs instead
+  # of zenoh-c's normal block_in_place-based synchronous API. zenoh-c's own
+  # Cargo.toml on that branch already repoints its zenoh/zenoh-ext/
+  # zenoh-runtime/zenoh-util deps at Tobias-Fischer/zenoh's wasm32-full branch
+  # (which itself carries the mio/tokio wasm32 patches), so nothing further is
+  # needed here for that part of the chain. See eclipse-zenoh/zenoh-c#1338 and
+  # eclipse-zenoh/zenoh-cpp#810 (both draft) for the corresponding upstream PRs.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    ament_vendor(zenoh_c_vendor
+      VCS_URL https://github.com/Tobias-Fischer/zenoh-c.git
+      VCS_VERSION wasm32-nonblocking-open
+      CMAKE_ARGS
+        "-DZENOHC_CARGO_FLAGS=${ZENOHC_CARGO_FLAGS}"
+        "-DZENOHC_BUILD_WITH_UNSTABLE_API=TRUE"
+        "-DZENOHC_CUSTOM_TARGET=${ZENOHC_CUSTOM_TARGET}"
+    )
 
-  ament_vendor(zenoh_cpp_vendor
-    VCS_URL https://github.com/eclipse-zenoh/zenoh-cpp
-    VCS_VERSION 481b71bf974f684ea75afb4243b0313646d545f9
-    CMAKE_ARGS
-      -DZENOHCXX_ZENOHC=OFF
-  )
+    ament_vendor(zenoh_cpp_vendor
+      VCS_URL https://github.com/Tobias-Fischer/zenoh-cpp.git
+      VCS_VERSION wasm32-nonblocking-open
+      CMAKE_ARGS
+        -DZENOHCXX_ZENOHC=OFF
+    )
+  else()
+    ament_vendor(zenoh_c_vendor
+      VCS_URL https://github.com/eclipse-zenoh/zenoh-c.git
+      VCS_VERSION ${zenoh_c_commit}
+      PATCHES
+        silence-build-script-warnings.patch
+      CMAKE_ARGS
+        "-DZENOHC_CARGO_FLAGS=${ZENOHC_CARGO_FLAGS}"
+        "-DZENOHC_BUILD_WITH_UNSTABLE_API=TRUE"
+        "-DZENOHC_CUSTOM_TARGET=${ZENOHC_CUSTOM_TARGET}"
+    )
+
+    ament_vendor(zenoh_cpp_vendor
+      VCS_URL https://github.com/eclipse-zenoh/zenoh-cpp
+      VCS_VERSION 481b71bf974f684ea75afb4243b0313646d545f9
+      CMAKE_ARGS
+        -DZENOHCXX_ZENOHC=OFF
+    )
+  endif()
 
   externalproject_add_stepdependencies(zenoh_cpp_vendor configure zenoh_c_vendor)
 endif()

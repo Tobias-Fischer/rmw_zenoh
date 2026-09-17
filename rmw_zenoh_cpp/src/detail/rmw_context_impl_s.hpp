@@ -39,6 +39,9 @@ public:
   // TODO(Yadunund): Make this a non-blocking call by checking for the Zenoh
   // router in a separate thread. Instead block when creating a node if router
   // check has not succeeded.
+  // On wasm32 (no real threads), the constructor does not block at all: it
+  // only starts opening the session. create_node_data() drives the rest of
+  // the (non-blocking) session setup to completion, one poll at a time.
   rmw_context_impl_s(
     const std::size_t domain_id,
     const std::string & enclave);
@@ -92,6 +95,14 @@ public:
 
   /// Return a pointer to the per-context BufferBackendContext.
   rmw_zenoh_cpp::BufferBackendContext * buffer_backend_context();
+
+#if defined(__wasm32__)
+  /// Drive the zenoh runtime forward by one non-blocking step. Must be called
+  /// repeatedly (e.g. from rmw_wait()'s polling loop) for any zenoh I/O --
+  /// publishing, receiving, discovery -- to make progress. A no-op until the
+  /// session has finished opening.
+  void wasm_pump_once();
+#endif
 
   // Forward declaration
   class Data;

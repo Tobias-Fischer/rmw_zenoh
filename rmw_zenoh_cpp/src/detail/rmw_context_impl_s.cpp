@@ -74,7 +74,12 @@ public:
     const std::string & enclave)
   {
     auto data = std::shared_ptr<Data>(new Data(domain_id, enclave));
+#if !defined(__wasm32__)
+    // On wasm32 the session isn't open yet at this point -- init() (which
+    // declares the liveliness subscriber, and needs a valid session) is
+    // instead called by wasm_try_complete_init() once opening finishes.
     data->init();
+#endif
     return data;
   }
 
@@ -92,12 +97,16 @@ public:
     zenoh::ZResult result;
     // no synchronization is needed here since undeclare will block
     // until inflight callbacks are finished
-    std::move(graph_subscriber_).value().undeclare(&result);
-    if (result != Z_OK) {
-      RMW_ZENOH_LOG_ERROR_NAMED(
-        "rmw_zenoh_cpp",
-        "Unable to undeclare the liveliness token");
-      return RMW_RET_ERROR;
+    // graph_subscriber_ may still be unset on wasm32 if shutdown races with an
+    // in-progress (non-blocking) session open -- nothing to undeclare in that case.
+    if (graph_subscriber_.has_value()) {
+      std::move(graph_subscriber_).value().undeclare(&result);
+      if (result != Z_OK) {
+        RMW_ZENOH_LOG_ERROR_NAMED(
+          "rmw_zenoh_cpp",
+          "Unable to undeclare the liveliness token");
+        return RMW_RET_ERROR;
+      }
     }
 
     if (buffer_backend_context_) {
@@ -112,9 +121,12 @@ public:
     // immediately. The session is then marked as closed, so when the shared_ptr refcount
     // eventually reaches zero (after rcl destroys each handle in the normal teardown order),
     // the session destructor finds is_closed()==true and skips the blocking close() call.
-    session_->close();
-
-    session_.reset();
+    // session_ may still be unset on wasm32 if shutdown happens before the (non-blocking)
+    // open ever completed.
+    if (session_) {
+      session_->close();
+      session_.reset();
+    }
 
     return RMW_RET_OK;
   }
@@ -151,7 +163,8 @@ public:
 
   bool session_is_valid() const
   {
-    return !session_->is_closed();
+    // session_ is null on wasm32 while the non-blocking open is still in progress.
+    return session_ && !session_->is_closed();
   }
 
   std::shared_ptr<rmw_zenoh_cpp::GraphCache> graph_cache()
@@ -175,6 +188,15 @@ public:
     const std::string & node_name)
   {
     std::lock_guard<std::mutex> lock(mutex_);
+#if defined(__wasm32__)
+    // The session may still be (non-blockingly) opening. Make what progress we
+    // can and, if it isn't done yet, fail this call -- the caller is expected
+    // to retry rmw_create_node() again later (e.g. on the next JS event-loop
+    // tick), same as rmw_zenoh_pico does for the same reason.
+    if (!wasm_try_complete_init()) {
+      return false;
+    }
+#endif
     if (nodes_.count(node) > 0) {
       // Node already exists.
       return false;
@@ -268,6 +290,29 @@ private:
     nodes_({}),
     liveliness_keyexpr_(rmw_zenoh_cpp::liveliness::subscription_token(domain_id))
   {
+#if defined(__wasm32__)
+    // No real threads here, so this constructor must not block: it only
+    // starts a non-blocking session open. wasm_try_complete_init() (driven
+    // from create_node_data()) does the rest -- opening the session, running
+    // the initial graph query, and declaring the liveliness subscriber --
+    // one non-blocking poll at a time. See wasm_try_complete_init() below for
+    // why the SHM setup and router-check retry loop that the native path
+    // does here are skipped entirely on this target.
+    std::optional<zenoh::Config> config = rmw_zenoh_cpp::get_z_config(
+      rmw_zenoh_cpp::ConfigurableEntity::Session);
+    if (!config.has_value()) {
+      throw std::runtime_error("Error configuring Zenoh session.");
+    }
+    runtime_.emplace();
+    open_task_.emplace(std::move(config.value()));
+
+    graph_guard_condition_ = std::make_unique<rmw_guard_condition_t>();
+    graph_guard_condition_->implementation_identifier = rmw_zenoh_cpp::rmw_zenoh_identifier;
+    graph_guard_condition_->data = &guard_condition_data_;
+    serialization_buffer_pool_ = std::make_shared<rmw_zenoh_cpp::BufferPool>();
+    buffer_backend_context_ = std::make_unique<rmw_zenoh_cpp::BufferBackendContext>();
+    rmw_zenoh_cpp::initialize_buffer_backends(*buffer_backend_context_);
+#else
     // Initialize the zenoh configuration.
     std::optional<zenoh::Config> config = rmw_zenoh_cpp::get_z_config(
       rmw_zenoh_cpp::ConfigurableEntity::Session);
@@ -519,7 +564,107 @@ private:
     // Initialize the buffer backend context.
     buffer_backend_context_ = std::make_unique<rmw_zenoh_cpp::BufferBackendContext>();
     rmw_zenoh_cpp::initialize_buffer_backends(*buffer_backend_context_);
+#endif  // defined(__wasm32__)
   }
+
+#if defined(__wasm32__)
+  // Drive the zenoh runtime forward by one non-blocking step.
+  void pump_once()
+  {
+    if (runtime_.has_value()) {
+      runtime_->pump_once();
+    }
+  }
+
+  // Advances the non-blocking session-open + initial graph query state
+  // machine by at most one step, and pumps the runtime so the underlying
+  // I/O (e.g. the WebSocket handshake) can actually progress. Returns true
+  // once the session is fully usable (safe to call again after that --
+  // it's then just a fast check). Must be called from a loop that
+  // eventually returns control to the browser's/Node's event loop between
+  // calls, e.g. rmw_create_node() retried across ticks -- a tight
+  // synchronous loop here would never let the handshake complete.
+  bool wasm_try_complete_init()
+  {
+    if (session_) {
+      return true;
+    }
+    if (init_failed_) {
+      return false;
+    }
+
+    pump_once();
+
+    if (open_task_.has_value()) {
+      zenoh::ZResult result = Z_OK;
+      std::optional<zenoh::Session> opened = open_task_->poll(*runtime_, &result);
+      if (!opened.has_value()) {
+        if (result != Z_OK) {
+          RMW_ZENOH_LOG_ERROR_NAMED("rmw_zenoh_cpp", "Error opening zenoh session.");
+          init_failed_ = true;
+        }
+        return false;
+      }
+      open_task_.reset();
+      session_ = std::make_shared<zenoh::Session>(std::move(opened.value()));
+      graph_cache_ = std::make_shared<rmw_zenoh_cpp::GraphCache>(session_->get_zid());
+
+      // Kick off the same initial graph query the native path makes, except
+      // via try_recv() (polled below) instead of a blocking recv() loop.
+      zenoh::Session::GetOptions get_options = zenoh::Session::GetOptions::create_default();
+      get_options.target = zenoh::QueryTarget::Z_QUERY_TARGET_ALL;
+      get_options.payload = "";
+      zenoh::ZResult get_result;
+      graph_query_replies_ = session_->liveliness_get(
+        liveliness_keyexpr_,
+        zenoh::channels::FifoChannel(SIZE_MAX - 1),
+        zenoh::Session::LivelinessGetOptions::create_default(),
+        &get_result);
+      if (get_result != Z_OK) {
+        RMW_ZENOH_LOG_ERROR_NAMED("rmw_zenoh_cpp", "Error getting liveliness.");
+        init_failed_ = true;
+        session_.reset();
+        return false;
+      }
+      return false;
+    }
+
+    // Draining the initial graph query, non-blockingly.
+    while (true) {
+      auto res = graph_query_replies_->try_recv();
+      if (std::holds_alternative<zenoh::channels::RecvError>(res)) {
+        if (std::get<zenoh::channels::RecvError>(res) == zenoh::channels::RecvError::Z_NODATA) {
+          return false;  // nothing more available this tick; keep polling
+        }
+        break;  // Z_DISCONNECTED: the query is complete
+      }
+      const zenoh::Reply & reply = std::get<zenoh::Reply>(res);
+      if (reply.is_ok()) {
+        const auto & sample = reply.get_ok();
+        graph_cache_->parse_put(std::string(sample.get_keyexpr().as_string_view()), true);
+      }
+    }
+    graph_query_replies_.reset();
+
+    // Declare the liveliness subscriber. This is a synchronous, non-blocking
+    // zenoh-cpp call (it follows zenoh's Wait/IntoFuture=ready(wait())
+    // pattern, not a real async wait), so it's safe to call directly here.
+    // init() throws on failure; unlike the native path (where the equivalent
+    // call happens inside RMW_TRY_PLACEMENT_NEW, in rmw_init()), there's no
+    // exception-translating wrapper this far from that call site, so catch
+    // it explicitly instead of letting it cross the rmw_create_node() C API
+    // boundary uncaught.
+    try {
+      this->init();
+    } catch (const std::exception & e) {
+      RMW_ZENOH_LOG_ERROR_NAMED(
+        "rmw_zenoh_cpp", "Unable to subscribe to ROS graph updates: %s", e.what());
+      init_failed_ = true;
+      return false;
+    }
+    return true;
+  }
+#endif  // defined(__wasm32__)
 
   void init()
   {
@@ -596,6 +741,21 @@ private:
   zenoh::KeyExpr liveliness_keyexpr_;
 
   std::unique_ptr<rmw_zenoh_cpp::BufferBackendContext> buffer_backend_context_;
+
+#if defined(__wasm32__)
+  // The single-threaded runtime driving zenoh's async internals. Populated
+  // by the constructor and pumped for the lifetime of the session.
+  std::optional<zenoh::Runtime> runtime_;
+  // Set while the session is opening; reset once it has (successfully or not).
+  std::optional<zenoh::SessionOpenTask> open_task_;
+  // Set while the initial graph query (replacing the native path's blocking
+  // liveliness_get() drain) is in flight; reset once it completes.
+  std::optional<zenoh::channels::FifoHandler<zenoh::Reply>> graph_query_replies_;
+  // Set once session open (or the graph query that follows it) fails.
+  // wasm_try_complete_init() will not retry after this -- the underlying
+  // zenoh::open() future has already been consumed either way.
+  bool init_failed_{false};
+#endif
 };
 
 ///=============================================================================
@@ -677,6 +837,14 @@ rmw_zenoh_cpp::BufferBackendContext * rmw_context_impl_s::buffer_backend_context
 {
   return data_->buffer_backend_context();
 }
+
+#if defined(__wasm32__)
+///=============================================================================
+void rmw_context_impl_s::wasm_pump_once()
+{
+  data_->pump_once();
+}
+#endif
 
 ///=============================================================================
 bool rmw_context_impl_s::create_node_data(

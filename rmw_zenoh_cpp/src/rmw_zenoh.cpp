@@ -2249,6 +2249,27 @@ rmw_wait(
 
 
     if (!skip_wait) {
+#if defined(__wasm32__)
+      // No real threads exist here, so there is nothing that could wake a
+      // condition_variable wait from the outside -- the only way anything
+      // ever becomes ready is if we ourselves drive the zenoh runtime
+      // forward. Do exactly one non-blocking pump and return either way;
+      // the caller (typically the executor's own spin loop, itself driven
+      // by the browser's/Node's event loop) is expected to call rmw_wait()
+      // again on its next tick. wait_timeout is therefore not honored here:
+      // there's no way to sleep without giving up this call's ability to
+      // return control to that outer event loop, which is what actually
+      // lets zenoh's I/O progress in the first place. See rmw_zenoh_pico's
+      // equivalent single-poll-then-return design for the same reason.
+      static_cast<void>(wait_timeout);
+      rmw_context_impl_s * context_impl =
+        wait_set_data->context ?
+        static_cast<rmw_context_impl_s *>(wait_set_data->context->impl) :
+        nullptr;
+      if (context_impl != nullptr) {
+        context_impl->wasm_pump_once();
+      }
+#else
       // now it is safe to take the lock
       // if wait_set_data->triggered was set to true in between,
       // the wait on the conditional will instantly return.
@@ -2270,6 +2291,7 @@ rmw_wait(
             [wait_set_data]() {return wait_set_data->triggered;});
         }
       }
+#endif
     }
   }
 

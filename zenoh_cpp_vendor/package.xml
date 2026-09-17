@@ -9,10 +9,19 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_vendor_package</buildtool_depend>
-
-  <build_depend>cargo</build_depend>
-  <build_depend>clang</build_depend>
-  <build_depend>git</build_depend>
+  <!-- cargo/clang/git are build-platform tools (they need to run natively to
+       cross-compile the vendored zenoh-c/zenoh-cpp), not target-platform
+       libraries -- buildtool_depend (not build_depend) is what routes them
+       into the recipe's "build" requirements instead of "host" when
+       cross-compiling. Upstream uses build_depend here, which happens to
+       work when build_platform == target_platform (the only case upstream
+       builds for) but breaks wasm32 cross-compilation: vinca resolved
+       "cargo" to the real "rust" conda package, but then requested it as a
+       *emscripten-wasm32* package (no such thing -- rustc itself doesn't
+       get cross-compiled, it needs to run on the build machine). -->
+  <buildtool_depend>cargo</buildtool_depend>
+  <buildtool_depend>clang</buildtool_depend>
+  <buildtool_depend>git</buildtool_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

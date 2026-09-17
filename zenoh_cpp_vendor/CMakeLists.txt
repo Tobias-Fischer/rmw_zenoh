@@ -36,7 +36,12 @@ else()
   # so wasm32 disables zenoh-c's crate-level defaults entirely and opts back
   # into only transport_tcp.
   if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
-    set(ZENOHC_CARGO_FLAGS "--no-default-features --features=zenoh/transport_tcp")
+    # --no-default-features and --features=... are two SEPARATE cargo
+    # arguments, so (per the note above) they need "$<SEMICOLON>" between
+    # them, not a plain space -- a space keeps them as one CMake list
+    # element, which reaches cargo as a single quoted argv entry
+    # ("--no-default-features --features=...") that it doesn't understand.
+    set(ZENOHC_CARGO_FLAGS "--no-default-features$<SEMICOLON>--features=zenoh/transport_tcp")
   else()
     set(ZENOHC_CARGO_FLAGS "--features=shared-memory zenoh/transport_serial")
   endif()

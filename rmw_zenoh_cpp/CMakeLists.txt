@@ -156,28 +156,40 @@ install(
   DESTINATION include
 )
 
-add_executable(rmw_zenohd
-  src/detail/liveliness_utils.cpp
-  src/detail/logging.cpp
-  src/detail/qos.cpp
-  src/detail/simplified_xxhash3.cpp
-  src/detail/zenoh_config.cpp
-  src/zenohd/main.cpp
-)
+# rmw_zenohd is a standalone zenoh router daemon executable -- an
+# alternative to running a native zenohd, not something the RMW plugin
+# itself (librmw_zenoh_cpp.so, which links fine as a SIDE_MODULE) needs at
+# runtime. Skipped on wasm32: nothing in this experiment runs its own
+# router in the browser, it always connects out to an external native
+# zenohd, and building it as a MAIN_MODULE=1 executable here hits a real
+# link failure ("undefined symbol: pthread_getname_np/pthread_setname_np",
+# from rcpputils::set_thread_name()/get_thread_name(), which is compiled
+# unconditionally there even though nothing calls it on this target) that
+# a SIDE_MODULE link tolerates but this MAIN_MODULE one does not.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  add_executable(rmw_zenohd
+    src/detail/liveliness_utils.cpp
+    src/detail/logging.cpp
+    src/detail/qos.cpp
+    src/detail/simplified_xxhash3.cpp
+    src/detail/zenoh_config.cpp
+    src/zenohd/main.cpp
+  )
 
-target_link_libraries(rmw_zenohd
-  PRIVATE
-    ament_index_cpp::ament_index_cpp
-    rcutils::rcutils
-    rcpputils::rcpputils
-    rmw::rmw
-    zenohcxx::zenohc
-    ament_cmake_ros_core::ament_ros_defaults
-)
+  target_link_libraries(rmw_zenohd
+    PRIVATE
+      ament_index_cpp::ament_index_cpp
+      rcutils::rcutils
+      rcpputils::rcpputils
+      rmw::rmw
+      zenohcxx::zenohc
+      ament_cmake_ros_core::ament_ros_defaults
+  )
 
-install(
-  TARGETS rmw_zenohd
-  DESTINATION lib/${PROJECT_NAME}
-)
+  install(
+    TARGETS rmw_zenohd
+    DESTINATION lib/${PROJECT_NAME}
+  )
+endif()
 
 ament_package()

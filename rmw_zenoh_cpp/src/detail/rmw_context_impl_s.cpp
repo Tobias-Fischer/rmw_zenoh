@@ -568,7 +568,11 @@ private:
   }
 
 #if defined(__wasm32__)
-  // Drive the zenoh runtime forward by one non-blocking step.
+public:
+  // Drive the zenoh runtime forward by one non-blocking step. Called from
+  // rmw_context_impl_s::wasm_pump_once(), the outer (pimpl) class -- needs
+  // to be public since a nested class's private members aren't accessible
+  // to its enclosing class, only the reverse.
   void pump_once()
   {
     if (runtime_.has_value()) {
@@ -576,6 +580,7 @@ private:
     }
   }
 
+private:
   // Advances the non-blocking session-open + initial graph query state
   // machine by at most one step, and pumps the runtime so the underlying
   // I/O (e.g. the WebSocket handshake) can actually progress. Returns true

@@ -23,9 +23,20 @@ else()
   # latter is a list separater in cmake and hence the string will be split into two when expanded.
   # shared-memory needs real OS shared memory (POSIX shm/mmap), which doesn't
   # exist -- or mean anything -- across a browser/WASM boundary, so it's
-  # dropped for the wasm32 experiment below.
+  # dropped for the wasm32 experiment below. transport_serial similarly
+  # doesn't apply (no serial ports in a browser).
+  #
+  # zenoh-c's own `default` feature set (see its Cargo.toml) unconditionally
+  # pulls in transport_quic/transport_tls/transport_quic_datagram, which
+  # depend on `ring` for crypto -- ring hand-writes per-target assembly/C and
+  # doesn't support wasm32-unknown-emscripten (confirmed: cc-rs invoked emcc
+  # with a native `--target=arm64-apple-macosx` flag while cross-compiling
+  # ring's C sources, which emcc rejects outright). None of TLS/QUIC are
+  # needed for this experiment (a plain TCP connection to a native zenohd),
+  # so wasm32 disables zenoh-c's crate-level defaults entirely and opts back
+  # into only transport_tcp.
   if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
-    set(ZENOHC_CARGO_FLAGS "--features=zenoh/transport_serial")
+    set(ZENOHC_CARGO_FLAGS "--no-default-features --features=zenoh/transport_tcp")
   else()
     set(ZENOHC_CARGO_FLAGS "--features=shared-memory zenoh/transport_serial")
   endif()

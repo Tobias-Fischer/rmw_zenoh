@@ -140,6 +140,7 @@ ShmContext::ShmContext(size_t msgsize_threshold)
 : msgsize_threshold(msgsize_threshold)
 {}
 
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
 std::optional<zenoh::SharedShmProvider> ShmContext::get_shm_provider(zenoh::Session & session)
 {
   auto maybe_provider = session.obtain_shm_provider();
@@ -148,6 +149,7 @@ std::optional<zenoh::SharedShmProvider> ShmContext::get_shm_provider(zenoh::Sess
   }
   return std::nullopt;
 }
+#endif
 
 
 ///=============================================================================

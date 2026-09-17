@@ -66,6 +66,17 @@ using buffer_endpoint_helpers::make_cpu_group_key;
 // by a RELIABLE + TRANSIENT_LOCAL Publisher
 #define SAMPLE_MISS_DETECTION_HEARTBEAT_PERIOD 500
 
+// zenoh::ZShmMut only exists when zenoh-cpp is built with SHM support (see
+// zenoh_utils.hpp's own ShmContext::get_shm_provider() guard). shm_buf
+// below is declared unconditionally either way -- only std::optional's own
+// .has_value() is used outside the SHM-specific blocks that populate/
+// consume it, which don't care what MaybeShmBuf actually is.
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
+using MaybeShmBuf = zenoh::ZShmMut;
+#else
+using MaybeShmBuf = std::monostate;
+#endif
+
 ///=============================================================================
 std::shared_ptr<PublisherData> PublisherData::make(
   std::shared_ptr<zenoh::Session> session,
@@ -527,7 +538,7 @@ rmw_ret_t PublisherData::publish(
   rcutils_allocator_t * allocator = &rmw_node_->context->options.allocator;
 
   // Optional shared memory buffer
-  std::optional<zenoh::ZShmMut> shm_buf = std::nullopt;
+  std::optional<MaybeShmBuf> shm_buf = std::nullopt;
   // Optional buffer reused for serialization from the buffer pool
   std::optional<BufferPool::Buffer> pool_buf = std::nullopt;
 
@@ -539,6 +550,7 @@ rmw_ret_t PublisherData::publish(
       allocator->deallocate(msg_bytes, allocator->state);
     });
 
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
   // Get memory from SHM buffer if available.
   if (shm && max_data_length >= shm->msgsize_threshold) {
     if (auto shm_provider = shm->get_shm_provider(*sess_)) {
@@ -561,6 +573,7 @@ rmw_ret_t PublisherData::publish(
         "rmw_zenoh_cpp", "SHM provider is not yet available, fallback to non-SHM");
     }
   }
+#endif
 
   if (!shm_buf.has_value()) {
     // Try to get memory from the serialization buffer pool.
@@ -604,9 +617,12 @@ rmw_ret_t PublisherData::publish(
     sequence_number_++, source_timestamp, entity_->copy_gid()).serialize_to_zbytes();
 
   zenoh::Bytes payload;
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
   if (shm_buf.has_value()) {
     payload = zenoh::Bytes(std::move(*shm_buf));
-  } else if (pool_buf.has_value() && pool_buf.value().data) {
+  } else
+#endif
+  if (pool_buf.has_value() && pool_buf.value().data) {
     auto deleter = [buffer_pool = context_impl->serialization_buffer_pool(),
         buffer = pool_buf](uint8_t *) {
         buffer_pool->deallocate(buffer.value());
@@ -652,7 +668,7 @@ rmw_ret_t PublisherData::publish_serialized_message(
   }
 
   // Optional shared memory buffer
-  std::optional<zenoh::ZShmMut> shm_buf = std::nullopt;
+  std::optional<MaybeShmBuf> shm_buf = std::nullopt;
 
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -666,6 +682,7 @@ rmw_ret_t PublisherData::publish_serialized_message(
   opts.put_options.attachment = rmw_zenoh_cpp::AttachmentData(
     sequence_number_++, source_timestamp, entity_->copy_gid()).serialize_to_zbytes();
 
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
   // Get memory from SHM buffer if available.
   if (shm && data_length >= shm->msgsize_threshold) {
     if (auto shm_provider = shm->get_shm_provider(*sess_)) {
@@ -698,7 +715,9 @@ rmw_ret_t PublisherData::publish_serialized_message(
       source_timestamp);
 
     base_endpoint_->pub.value().put(std::move(payload), std::move(opts), &result);
-  } else {
+  } else
+#endif
+  {
     std::vector<uint8_t> raw_image(
       serialized_message->buffer,
       serialized_message->buffer + data_length);

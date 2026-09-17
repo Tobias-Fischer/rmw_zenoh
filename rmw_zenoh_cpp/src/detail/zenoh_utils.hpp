@@ -100,7 +100,9 @@ struct ShmContext
 
   explicit ShmContext(size_t msgsize_threshold);
 
+#if defined(ZENOHCXX_ZENOHC) && defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
   std::optional<zenoh::SharedShmProvider> get_shm_provider(zenoh::Session & session);
+#endif
 };
 
 ///=============================================================================
